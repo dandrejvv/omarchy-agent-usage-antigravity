@@ -1,0 +1,59 @@
+#!/bin/bash
+
+# omarchy:summary=Regenerate AI agent usage data files including Google Antigravity
+# omarchy:args=[--force] [--limits-only] [--except <agent>] [agent...]
+
+USAGE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage"
+mkdir -p "$USAGE_DIR"
+
+flags=()
+only=()
+declare -A excluded
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --force | --limits-only) flags+=("$1") ;;
+  --except)
+    excluded[$2]=1
+    shift
+    ;;
+  *) only+=("$1") ;;
+  esac
+  shift
+done
+
+wanted() {
+  local agent="$1"
+  [[ -n ${excluded[$agent]} ]] && return 1
+  (( ${#only[@]} == 0 )) && return 0
+  local candidate
+  for candidate in "${only[@]}"; do
+    [[ $candidate == "$agent" ]] && return 0
+  done
+  return 1
+}
+
+# Run the standard Omarchy collectors
+/usr/bin/omarchy-agent-usage-update "${flags[@]}" "$@" || true
+
+# Run Antigravity collector if wanted
+if wanted "antigravity"; then
+  collector=""
+  if command -v omarchy-agent-usage-antigravity &>/dev/null; then
+    collector="omarchy-agent-usage-antigravity"
+  elif [[ -x "$HOME/Projects/omarchy-agent-usage-antigravity/bin/omarchy-agent-usage-antigravity" ]]; then
+    collector="$HOME/Projects/omarchy-agent-usage-antigravity/bin/omarchy-agent-usage-antigravity"
+  fi
+
+  if [[ -n "$collector" ]]; then
+    if record=$("$collector" "${flags[@]}") && [[ -n "$record" ]] && jq -e . >/dev/null 2>&1 <<<"$record"; then
+      tmp=$(mktemp "$USAGE_DIR/.antigravity.XXXXXX")
+      printf '%s\n' "$record" >"$tmp"
+      mv "$tmp" "$USAGE_DIR/antigravity.json"
+    else
+      echo "omarchy-agent-usage-update: antigravity collector failed" >&2
+    fi
+  fi
+fi
+
+exit 0

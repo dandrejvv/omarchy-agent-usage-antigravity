@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "custom.agents",
+  "name": "Agents",
+  "version": "1.0.0",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.agents"
+  }
+}

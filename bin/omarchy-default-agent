@@ -1,0 +1,16 @@
+#!/bin/bash
+
+# Wrapper for omarchy-default-agent with Google Antigravity support
+
+if [[ "${1:-}" == "antigravity" || "${1:-}" == "agy" ]]; then
+  agent_file="$HOME/.config/omarchy/defaults/agent"
+  mkdir -p "$(dirname "$agent_file")"
+  printf 'antigravity\n' >"$agent_file"
+  if [[ "${2:-}" == "--inline" ]]; then
+    exec omarchy-agent --inline
+  else
+    exec omarchy-agent
+  fi
+fi
+
+exec /usr/bin/omarchy-default-agent "$@"
