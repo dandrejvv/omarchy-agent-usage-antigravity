@@ -16,11 +16,11 @@ echo "    Font verified: $(fc-match antigravity)"
 # 2. Install binaries & wrappers
 echo "--> Installing command wrappers into ~/.local/bin/..."
 mkdir -p "$HOME/.local/bin"
-cp "$SCRIPT_DIR/bin/omarchy-agent-usage-antigravity" "$HOME/.local/bin/"
-cp "$SCRIPT_DIR/bin/omarchy-agent-usage-update" "$HOME/.local/bin/"
-cp "$SCRIPT_DIR/bin/omarchy-agent" "$HOME/.local/bin/"
-cp "$SCRIPT_DIR/bin/omarchy-default-agent" "$HOME/.local/bin/"
-chmod +x "$HOME/.local/bin/omarchy-"*
+for bin in omarchy-agent-usage-antigravity omarchy-agent-usage-update omarchy-agent omarchy-default-agent; do
+  rm -f "$HOME/.local/bin/$bin"
+  cp "$SCRIPT_DIR/bin/$bin" "$HOME/.local/bin/$bin"
+  chmod +x "$HOME/.local/bin/$bin"
+done
 
 # 3. Ensure ~/.local/bin in ~/.bashrc before non-interactive return
 if ! grep -q 'export PATH="\$HOME/\.local/bin:\$PATH"' "$HOME/.bashrc" 2>/dev/null; then
