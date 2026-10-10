@@ -28,6 +28,12 @@ if ! grep -q 'export PATH="\$HOME/\.local/bin:\$PATH"' "$HOME/.bashrc" 2>/dev/nu
   sed -i '/env-bootstrap/a export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc"
 fi
 
+# 0. Check for agy binary
+if ! command -v agy >/dev/null 2>&1 && [[ ! -x "$HOME/.local/bin/agy" ]]; then
+  echo "⚠️  Note: 'agy' (Google Antigravity CLI) was not found in PATH or ~/.local/bin/."
+  echo "   Ensure 'agy' is installed so Omarchy can launch the agent."
+fi
+
 # 4. Install custom.agents shell plugin
 echo "--> Installing custom.agents shell plugin..."
 mkdir -p "$HOME/.config/omarchy/plugins/custom.agents/assets"
@@ -35,6 +41,11 @@ cp -r "$SCRIPT_DIR/plugin/"* "$HOME/.config/omarchy/plugins/custom.agents/"
 
 # 5. Configure shell.json
 echo "--> Updating bar layout in ~/.config/omarchy/shell.json..."
+mkdir -p "$HOME/.config/omarchy"
+if [[ ! -f "$HOME/.config/omarchy/shell.json" && -f "/usr/share/omarchy/config/omarchy/shell.json" ]]; then
+  cp "/usr/share/omarchy/config/omarchy/shell.json" "$HOME/.config/omarchy/shell.json"
+fi
+
 if [[ -f "$HOME/.config/omarchy/shell.json" ]]; then
   if grep -q '"omarchy.agents"' "$HOME/.config/omarchy/shell.json"; then
     cp "$HOME/.config/omarchy/shell.json" "$HOME/.config/omarchy/shell.json.bak.$(date +%s)"
