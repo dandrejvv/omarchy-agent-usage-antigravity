@@ -5,15 +5,15 @@
 """Collect Google Antigravity usage into one display-ready JSON record.
 
 Data comes from ~/.gemini/antigravity-cli/:
-- brain/<conversation-id>/transcript.jsonl: model inference, tokens, and steps
-- history.jsonl: timestamped prompt logs, active days, and 7-day activity array
+- brain/<conversation-id>/: transcript logs with actual API token usage
+- history.jsonl: timestamped prompt logs and active days
 - conversation_summaries.db: SQLite database for session counts
-- Rolling rate limits: 5h session window and 7d weekly window
 """
 
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -25,21 +25,14 @@ AGENT_ID = "antigravity"
 AGENT_NAME = "Antigravity"
 SCAN_REUSE_SECONDS = 20
 LIMITS_ONLY_REUSE_SECONDS = 900
-DEFAULT_TIER = "Google AI Pro"
+DEFAULT_TIER = ""
 
 
 def parse_history(history_file, now):
-    today_str = now.strftime("%Y-%m-%d")
-    recent_dates = [(now - timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(6, -1, -1)]
-    recent = {day: {"date": day, "messageCount": 0} for day in recent_dates}
     active_dates = set()
-
     total_prompts = 0
     today_prompts = 0
-    recent_timestamps_5h = []
-    recent_timestamps_7d = []
-    cutoff_5h = (now - timedelta(hours=5)).timestamp()
-    cutoff_7d = (now - timedelta(days=7)).timestamp()
+    today_str = now.strftime("%Y-%m-%d")
 
     if os.path.exists(history_file):
         try:
@@ -56,17 +49,11 @@ def parse_history(history_file, now):
                     ts_ms = item.get("timestamp")
                     if ts_ms:
                         ts_sec = ts_ms / 1000.0
-                        dt = datetime.fromtimestamp(ts_sec)
+                        dt = datetime.fromtimestamp(ts_sec).astimezone()
                         day_str = dt.strftime("%Y-%m-%d")
                         active_dates.add(day_str)
-                        if day_str in recent:
-                            recent[day_str]["messageCount"] += 1
                         if day_str == today_str:
                             today_prompts += 1
-                        if ts_sec >= cutoff_5h:
-                            recent_timestamps_5h.append(ts_sec)
-                        if ts_sec >= cutoff_7d:
-                            recent_timestamps_7d.append(ts_sec)
         except Exception:
             pass
 
@@ -75,13 +62,11 @@ def parse_history(history_file, now):
         "todayPrompts": today_prompts,
         "activeDates": sorted(list(active_dates)),
         "activeDays": len(active_dates),
-        "recentDays": list(recent.values()),
-        "timestamps5h": sorted(recent_timestamps_5h),
-        "timestamps7d": sorted(recent_timestamps_7d),
     }
 
 
-def parse_sessions(db_file, brain_dir):
+def parse_sessions(db_file, brain_dir, now):
+    today_str = now.strftime("%Y-%m-%d")
     total_sessions = 0
     today_sessions = 0
 
@@ -89,17 +74,22 @@ def parse_sessions(db_file, brain_dir):
         try:
             conn = sqlite3.connect(f"file:{db_file}?immutable=1", uri=True)
             cur = conn.cursor()
-            cur.execute("SELECT count(*) FROM conversation_summaries")
-            row = cur.fetchone()
-            if row:
-                total_sessions = int(row[0] or 0)
-            cur.execute(
-                "SELECT count(*) FROM conversation_summaries WHERE date(last_modified_time) = date('now')"
-            )
-            row = cur.fetchone()
-            if row:
-                today_sessions = int(row[0] or 0)
+            cur.execute("SELECT last_modified_time FROM conversation_summaries")
+            rows = cur.fetchall()
             conn.close()
+            for (raw_time,) in rows:
+                total_sessions += 1
+                if raw_time:
+                    try:
+                        clean = str(raw_time).strip()
+                        if " " in clean and "T" not in clean:
+                            clean = clean.replace(" ", "T", 1)
+                        clean = re.sub(r"(\.\d{6})\d+", r"\1", clean)
+                        dt = datetime.fromisoformat(clean).astimezone()
+                        if dt.strftime("%Y-%m-%d") == today_str:
+                            today_sessions += 1
+                    except Exception:
+                        pass
             return total_sessions, today_sessions
         except Exception:
             pass
@@ -113,135 +103,186 @@ def parse_sessions(db_file, brain_dir):
                 and not d.startswith(".")
             ]
             total_sessions = len(entries)
-            today_sessions = min(1, total_sessions)
+            for d in entries:
+                p = os.path.join(brain_dir, d)
+                mtime = os.path.getmtime(p)
+                dt = datetime.fromtimestamp(mtime).astimezone()
+                if dt.strftime("%Y-%m-%d") == today_str:
+                    today_sessions += 1
         except Exception:
             pass
 
     return total_sessions, today_sessions
 
 
+def slugify_model(name):
+    clean = name.lower().strip()
+    clean = re.sub(r"\s*\([^)]*\)", "", clean)
+    slug = re.sub(r"[^a-z0-9.]+", "-", clean).strip("-")
+    return slug or "gemini-3.8-flash"
+
+
 def parse_transcripts(brain_dir, now):
     today_str = now.strftime("%Y-%m-%d")
+    recent_dates = [
+        (now - timedelta(days=offset)).strftime("%Y-%m-%d")
+        for offset in range(6, -1, -1)
+    ]
+    tokens_by_day = {day: 0 for day in recent_dates}
     model_usage = {}
     today_tokens_by_model = {}
     today_total_tokens = 0
-    primary_model = "gemini-3.8-flash"
 
     if not os.path.exists(brain_dir):
         return {
             "modelUsage": model_usage,
             "todayTokensByModel": today_tokens_by_model,
             "todayTotalTokens": today_total_tokens,
+            "recentDays": [{"date": d, "messageCount": 0} for d in recent_dates],
         }
 
-    for root, dirs, files in os.walk(brain_dir):
-        for f in files:
-            if f.startswith("transcript") and f.endswith(".jsonl"):
-                full_path = os.path.join(root, f)
+    for entry in os.listdir(brain_dir):
+        conv_dir = os.path.join(brain_dir, entry)
+        if not os.path.isdir(conv_dir) or entry.startswith("."):
+            continue
+
+        logs_dir = os.path.join(conv_dir, ".system_generated", "logs")
+        target_path = None
+        for candidate in [
+            os.path.join(logs_dir, "transcript_full.jsonl"),
+            os.path.join(logs_dir, "transcript.jsonl"),
+            os.path.join(conv_dir, "transcript.jsonl"),
+        ]:
+            if os.path.isfile(candidate):
+                target_path = candidate
+                break
+
+        if not target_path:
+            continue
+
+        session_model = None
+        records = []
+        has_explicit_tokens = False
+
+        try:
+            with open(target_path, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except Exception:
+                        continue
+                    records.append(data)
+
+                    if data.get("input_tokens") is not None or data.get("output_tokens") is not None:
+                        has_explicit_tokens = True
+
+                    content = str(data.get("content", ""))
+                    if data.get("type") == "USER_INPUT" and "<USER_SETTINGS_CHANGE>" in content:
+                        match = re.search(
+                            r"<USER_SETTINGS_CHANGE>.*?Model Selection.*?to\s+([^\n<]+?)\.(?:\s*No need|\s*If reporting|\n|</USER_SETTINGS_CHANGE>)",
+                            content,
+                            re.DOTALL,
+                        )
+                        if match:
+                            session_model = slugify_model(match.group(1))
+        except Exception:
+            continue
+
+        active_model = session_model or "gemini-3.8-flash"
+        bucket = model_usage.setdefault(
+            active_model,
+            {
+                "inputTokens": 0,
+                "outputTokens": 0,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+            },
+        )
+
+        for data in records:
+            in_t = data.get("input_tokens")
+            out_t = data.get("output_tokens")
+            cache_t = data.get("cache_read_tokens") or 0
+
+            created_at = data.get("created_at", "")
+            step_day = None
+            if created_at:
                 try:
-                    with open(full_path, encoding="utf-8", errors="replace") as fh:
-                        for line in fh:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                data = json.loads(line)
-                            except Exception:
-                                continue
-
-                            step_type = data.get("type")
-                            created_at = data.get("created_at", "")
-                            is_today = created_at.startswith(today_str) if created_at else False
-
-                            in_chars = 0
-                            out_chars = 0
-                            if step_type in ("USER_INPUT", "GENERIC", "SYSTEM_MESSAGE"):
-                                in_chars += len(str(data.get("content", "")))
-                            elif step_type == "PLANNER_RESPONSE":
-                                out_chars += len(str(data.get("thinking", "")))
-                                out_chars += len(str(data.get("content", "")))
-                                out_chars += len(str(data.get("tool_calls", "")))
-
-                            in_tok = max(1, in_chars // 4) if in_chars else 0
-                            out_tok = max(1, out_chars // 4) if out_chars else 0
-                            tok_sum = in_tok + out_tok
-                            if tok_sum == 0:
-                                continue
-
-                            bucket = model_usage.setdefault(
-                                primary_model,
-                                {
-                                    "inputTokens": 0,
-                                    "outputTokens": 0,
-                                    "cacheReadInputTokens": 0,
-                                    "cacheCreationInputTokens": 0,
-                                },
-                            )
-                            bucket["inputTokens"] += in_tok
-                            bucket["outputTokens"] += out_tok
-
-                            if is_today:
-                                today_total_tokens += tok_sum
-                                today_tokens_by_model[primary_model] = (
-                                    today_tokens_by_model.get(primary_model, 0) + tok_sum
-                                )
+                    clean_ts = created_at.replace("Z", "+00:00")
+                    clean_ts = re.sub(r"(\.\d{6})\d+", r"\1", clean_ts)
+                    dt = datetime.fromisoformat(clean_ts).astimezone()
+                    step_day = dt.strftime("%Y-%m-%d")
                 except Exception:
+                    step_day = created_at[:10]
+
+            if has_explicit_tokens:
+                if in_t is None and out_t is None:
                     continue
+                in_val = int(in_t or 0)
+                out_val = int(out_t or 0)
+                cache_val = int(cache_t or 0)
+            else:
+                step_type = data.get("type")
+                content = str(data.get("content", ""))
+                in_chars = 0
+                out_chars = 0
+                if step_type in ("USER_INPUT", "GENERIC", "SYSTEM_MESSAGE"):
+                    in_chars += len(content)
+                elif step_type == "PLANNER_RESPONSE":
+                    out_chars += (
+                        len(str(data.get("thinking", "")))
+                        + len(content)
+                        + len(str(data.get("tool_calls", "")))
+                    )
+                in_val = max(1, in_chars // 4) if in_chars else 0
+                out_val = max(1, out_chars // 4) if out_chars else 0
+                cache_val = 0
+
+            tok_sum = in_val + out_val
+            if tok_sum == 0 and cache_val == 0:
+                continue
+
+            bucket["inputTokens"] += in_val
+            bucket["outputTokens"] += out_val
+            bucket["cacheReadInputTokens"] += cache_val
+
+            if step_day and step_day in tokens_by_day:
+                tokens_by_day[step_day] += tok_sum
+
+            if step_day == today_str:
+                today_total_tokens += tok_sum
+                today_tokens_by_model[active_model] = (
+                    today_tokens_by_model.get(active_model, 0) + tok_sum
+                )
+
+    recent_days = [
+        {"date": day, "messageCount": tokens_by_day[day]} for day in recent_dates
+    ]
 
     return {
         "modelUsage": model_usage,
         "todayTokensByModel": today_tokens_by_model,
         "todayTotalTokens": today_total_tokens,
+        "recentDays": recent_days,
     }
 
 
-def compute_limits(history_stats, now, limits_override_path):
-    # Check if an external limits file exists (e.g. written by IDE or mock)
+def compute_limits(limits_override_path):
     if os.path.exists(limits_override_path):
         try:
             with open(limits_override_path, encoding="utf-8") as f:
                 data = json.load(f)
-                if "limits" in data and isinstance(data["limits"], list):
-                    tier = data.get("tierLabel", DEFAULT_TIER)
-                    return data["limits"], tier
+                if isinstance(data, dict):
+                    limits = data.get("limits", [])
+                    tier = data.get("tierLabel", "")
+                    return limits, tier
         except Exception:
             pass
 
-    # Rolling window calculation
-    ts_5h = history_stats["timestamps5h"]
-    ts_7d = history_stats["timestamps7d"]
-
-    # Budget assumptions: 5h rate limit (~100 prompts) and 7d rolling quota (~1000 prompts)
-    count_5h = len(ts_5h)
-    count_7d = len(ts_7d)
-
-    # 5h window: percent used float between 0.0 and 1.0
-    percent_5h = min(1.0, max(0.05, count_5h / 50.0)) if count_5h else 0.0
-    if ts_5h:
-        reset_5h_dt = datetime.fromtimestamp(ts_5h[0] + 5 * 3600, timezone.utc)
-    else:
-        reset_5h_dt = datetime.now(timezone.utc) + timedelta(hours=5)
-
-    # 7d window: percent used float between 0.0 and 1.0
-    percent_7d = min(1.0, max(0.10, count_7d / 200.0)) if count_7d else 0.0
-    if ts_7d:
-        reset_7d_dt = datetime.fromtimestamp(ts_7d[0] + 7 * 86400, timezone.utc)
-    else:
-        reset_7d_dt = datetime.now(timezone.utc) + timedelta(days=7)
-
-    limits = [
-        {
-            "label": "5h window",
-            "percent": round(percent_5h, 2),
-            "resetsAt": reset_5h_dt.isoformat(),
-        },
-        {
-            "label": "Weekly (7-day)",
-            "percent": round(percent_7d, 2),
-            "resetsAt": reset_7d_dt.isoformat(),
-        },
-    ]
-    return limits, DEFAULT_TIER
+    return [], ""
 
 
 def main():
@@ -254,13 +295,13 @@ def main():
     home = str(Path.home())
     antigravity_dir = os.path.join(home, ".gemini/antigravity-cli")
     cache_dir = os.path.join(home, ".cache/omarchy/agent-usage")
-    cache_file = os.path.join(cache_dir, "antigravity.json")
-    limits_override = os.path.join(cache_dir, "antigravity-limits.json")
+    cache_file = os.path.join(cache_dir, f"{AGENT_ID}.json")
+    limits_override = os.path.join(home, ".config/omarchy/agents", f"{AGENT_ID}.json")
     default_target_dir = os.path.join(home, ".local/state/omarchy/agents/usage")
-    default_target = os.path.join(default_target_dir, "antigravity.json")
+    default_target = os.path.join(default_target_dir, f"{AGENT_ID}.json")
     target_file = args.output or default_target
 
-    now = datetime.now()
+    now = datetime.now().astimezone()
     now_ts = now.timestamp()
 
     # Check cache
@@ -276,7 +317,6 @@ def main():
             cached_record = None
 
     if cached_record:
-        # Refresh updatedAt timestamp and limits if limits-only
         cached_record["updatedAt"] = datetime.now(timezone.utc).isoformat()
         record_json = json.dumps(cached_record, separators=(",", ":"))
         print(record_json)
@@ -288,9 +328,9 @@ def main():
     brain_dir = os.path.join(antigravity_dir, "brain")
 
     hist_stats = parse_history(history_file, now)
-    total_sess, today_sess = parse_sessions(db_file, brain_dir)
+    total_sess, today_sess = parse_sessions(db_file, brain_dir, now)
     trans_stats = parse_transcripts(brain_dir, now)
-    limits, tier = compute_limits(hist_stats, now, limits_override)
+    limits, tier = compute_limits(limits_override)
 
     record = {
         "schemaVersion": 1,
@@ -303,7 +343,7 @@ def main():
         "todaySessions": today_sess,
         "todayTotalTokens": trans_stats["todayTotalTokens"],
         "todayTokensByModel": trans_stats["todayTokensByModel"],
-        "recentDays": hist_stats["recentDays"],
+        "recentDays": trans_stats["recentDays"],
         "totalPrompts": hist_stats["totalPrompts"],
         "totalSessions": total_sess,
         "activeDays": hist_stats["activeDays"],
