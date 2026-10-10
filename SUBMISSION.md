@@ -1,6 +1,6 @@
 # Google Antigravity Integration Upstream Submission
 
-This guide describes how to submit the Antigravity integration upstream to `basecamp/omarchy`.
+This guide describes how to submit the Antigravity integration upstream to `omacom/omarchy`.
 
 ## Package Directory Structure
 
@@ -13,14 +13,14 @@ This guide describes how to submit the Antigravity integration upstream to `base
 ├── bin/
 │   └── omarchy-agent-usage-antigravity # Python collector script
 ├── test-local.sh                  # Local test script
-└── SUBMISSION.md                  # Step-by-step PR guide for basecamp/omarchy
+└── SUBMISSION.md                  # Step-by-step PR guide for omacom/omarchy
 ```
 
 ## Step-by-Step Upstream Contribution Process
 
 ### 1. Fork & Clone Upstream Repository
 ```bash
-gh repo fork basecamp/omarchy --clone
+gh repo fork omacom/omarchy --clone
 cd omarchy
 git checkout -b feat-antigravity-agent
 ```

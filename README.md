@@ -1,6 +1,6 @@
 # Google Antigravity Integration for Omarchy
 
-Full Google Antigravity (`agy`) integration for the [Omarchy](https://github.com/basecamp/omarchy) desktop environment.
+Full Google Antigravity (`agy`) integration for the [Omarchy](https://github.com/omacom/omarchy) desktop environment.
 
 Provides a Quickshell top-bar widget with real-time token and quota progress bars, automated usage collection, custom vector brand assets, font glyphs, launcher wrappers, and Omarchy application menu integration.
 
@@ -47,7 +47,7 @@ To restore stock Omarchy defaults and remove all Antigravity wrappers and plugin
 
 ## Upstream Contribution
 
-To contribute this integration directly to the official `basecamp/omarchy` repository, follow the detailed instructions in [SUBMISSION.md](SUBMISSION.md).
+To contribute this integration directly to the official `omacom/omarchy` repository, follow the detailed instructions in [SUBMISSION.md](SUBMISSION.md).
 
 ---
 
